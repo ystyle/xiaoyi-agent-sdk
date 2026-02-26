@@ -68,12 +68,14 @@ type MessageHandler func(ctx context.Context, msg Message) error
 
 ```go
 type Config struct {
-    AK             string
-    SK             string
-    AgentID        string
-    WSUrl1         string // 可选
-    WSUrl2         string // 可选
-    EnableStreaming bool  // 默认 true
+    AK              string
+    SK              string
+    AgentID         string
+    WSUrl1          string        // 可选，默认小艺服务器1
+    WSUrl2          string        // 可选，默认小艺服务器2
+    EnableStreaming bool          // 默认 true
+    SingleServer    bool          // 默认 false，只连接 server1
+    ReconnectDelay  time.Duration // 默认 10s，重连基础延迟
 }
 
 func New(cfg *Config) Client

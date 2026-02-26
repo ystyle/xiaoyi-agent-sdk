@@ -3,7 +3,7 @@ package websocket
 import (
 	"context"
 	"crypto/tls"
-	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"sync"
@@ -20,6 +20,11 @@ type ClearHandler func(sessionID string)
 type CancelHandler func(sessionID, taskID string)
 type ErrorHandler func(serverID types.ServerID, err error)
 type StateHandler func(serverID types.ServerID, connected bool)
+
+type reconnectEvent struct {
+	serverID types.ServerID
+	delay    time.Duration
+}
 
 type Manager struct {
 	config *types.Config
@@ -47,8 +52,9 @@ type Manager struct {
 		state   StateHandler
 	}
 
-	done chan struct{}
-	wg   sync.WaitGroup
+	reconnectChan chan reconnectEvent
+	done          chan struct{}
+	wg            sync.WaitGroup
 }
 
 func NewManager(cfg *types.Config) *Manager {
@@ -56,6 +62,7 @@ func NewManager(cfg *types.Config) *Manager {
 		config:           cfg,
 		auth:             auth.New(cfg.AK, cfg.SK, cfg.AgentID),
 		sessionServerMap: make(map[string]types.ServerID),
+		reconnectChan:    make(chan reconnectEvent, 10),
 		done:             make(chan struct{}),
 	}
 }
@@ -81,26 +88,33 @@ func (m *Manager) OnState(h StateHandler) {
 }
 
 func (m *Manager) Connect(ctx context.Context) error {
-	var err1, err2 error
-	var wg sync.WaitGroup
-	wg.Add(2)
+	if m.config.SingleServer {
+		if err := m.connectServer1(ctx); err != nil {
+			return types.ErrConnectFailed
+		}
+	} else {
+		var err1, err2 error
+		var wg sync.WaitGroup
+		wg.Add(2)
 
-	go func() {
-		defer wg.Done()
-		err1 = m.connectServer1(ctx)
-	}()
+		go func() {
+			defer wg.Done()
+			err1 = m.connectServer1(ctx)
+		}()
 
-	go func() {
-		defer wg.Done()
-		err2 = m.connectServer2(ctx)
-	}()
+		go func() {
+			defer wg.Done()
+			err2 = m.connectServer2(ctx)
+		}()
 
-	wg.Wait()
+		wg.Wait()
 
-	if err1 != nil && err2 != nil {
-		return types.ErrConnectFailed
+		if err1 != nil && err2 != nil {
+			return types.ErrConnectFailed
+		}
 	}
 
+	go m.reconnectLoop()
 	go m.startHeartbeat()
 	return nil
 }
@@ -122,13 +136,20 @@ func (m *Manager) connectServer1(ctx context.Context) error {
 		return err
 	}
 
+	conn.SetPongHandler(func(appData string) error {
+		m.ws1Mu.Lock()
+		m.state1.LastHeartbeat = time.Now().Unix()
+		m.ws1Mu.Unlock()
+		return nil
+	})
+
 	m.ws1Mu.Lock()
 	m.ws1 = conn
-	m.ws1Mu.Unlock()
-
 	m.state1.Connected = true
 	m.state1.Ready = true
 	m.state1.LastHeartbeat = time.Now().Unix()
+	m.connectedTime1 = time.Now()
+	m.ws1Mu.Unlock()
 
 	if m.handlers.state != nil {
 		m.handlers.state(types.Server1, true)
@@ -138,7 +159,7 @@ func (m *Manager) connectServer1(ctx context.Context) error {
 	m.sendToServer1(initMsg)
 
 	go m.readLoop(conn, types.Server1)
-	go m.pingLoop(conn, types.Server1, &m.state1, &m.ws1Mu)
+	go m.pingLoop(conn, types.Server1)
 
 	return nil
 }
@@ -160,13 +181,20 @@ func (m *Manager) connectServer2(ctx context.Context) error {
 		return err
 	}
 
+	conn.SetPongHandler(func(appData string) error {
+		m.ws2Mu.Lock()
+		m.state2.LastHeartbeat = time.Now().Unix()
+		m.ws2Mu.Unlock()
+		return nil
+	})
+
 	m.ws2Mu.Lock()
 	m.ws2 = conn
-	m.ws2Mu.Unlock()
-
 	m.state2.Connected = true
 	m.state2.Ready = true
 	m.state2.LastHeartbeat = time.Now().Unix()
+	m.connectedTime2 = time.Now()
+	m.ws2Mu.Unlock()
 
 	if m.handlers.state != nil {
 		m.handlers.state(types.Server2, true)
@@ -176,7 +204,7 @@ func (m *Manager) connectServer2(ctx context.Context) error {
 	m.sendToServer2(initMsg)
 
 	go m.readLoop(conn, types.Server2)
-	go m.pingLoop(conn, types.Server2, &m.state2, &m.ws2Mu)
+	go m.pingLoop(conn, types.Server2)
 
 	return nil
 }
@@ -191,7 +219,7 @@ func (m *Manager) sendToServer1(msg *types.OutboundMessage) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("[SEND server1] %s\n", string(data))
+	slog.Debug("发送消息", "server", "server1", "data", string(data))
 	return m.ws1.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -205,7 +233,7 @@ func (m *Manager) sendToServer2(msg *types.OutboundMessage) error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("[SEND server2] %s\n", string(data))
+	slog.Debug("发送消息", "server", "server2", "data", string(data))
 	return m.ws2.WriteMessage(websocket.TextMessage, data)
 }
 
@@ -220,8 +248,18 @@ func (m *Manager) readLoop(conn *websocket.Conn, id types.ServerID) {
 		default:
 			_, data, err := conn.ReadMessage()
 			if err != nil {
-				fmt.Printf("[READ ERROR] server=%s error=%v\n", id, err)
-				m.handleDisconnect(id)
+				delay := time.Duration(0)
+				if websocket.IsCloseError(err, websocket.CloseNormalClosure) {
+					slog.Info("服务器关闭连接", "server", id, "code", 1000)
+					delay = 5 * time.Second
+				} else {
+					slog.Warn("连接断开", "server", id, "error", err)
+				}
+				m.cleanupConnection(id)
+				select {
+				case m.reconnectChan <- reconnectEvent{serverID: id, delay: delay}:
+				case <-m.done:
+				}
 				return
 			}
 			m.handleMessage(data, id)
@@ -229,7 +267,10 @@ func (m *Manager) readLoop(conn *websocket.Conn, id types.ServerID) {
 	}
 }
 
-func (m *Manager) pingLoop(conn *websocket.Conn, id types.ServerID, state *types.ServerState, wsMu *sync.Mutex) {
+func (m *Manager) pingLoop(conn *websocket.Conn, id types.ServerID) {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
 	ticker := time.NewTicker(types.ProtocolHeartbeat)
 	defer ticker.Stop()
 
@@ -238,22 +279,156 @@ func (m *Manager) pingLoop(conn *websocket.Conn, id types.ServerID, state *types
 		case <-m.done:
 			return
 		case <-ticker.C:
-			wsMu.Lock()
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				wsMu.Unlock()
-				m.handleDisconnect(id)
-				return
+			m.ws1Mu.Lock()
+			if id == types.Server1 && m.ws1 == conn {
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					m.ws1Mu.Unlock()
+					m.triggerReconnect(id, 0)
+					return
+				}
+				if time.Since(time.Unix(m.state1.LastHeartbeat, 0)) > types.HeartbeatTimeout {
+					m.ws1Mu.Unlock()
+					m.triggerReconnect(id, 0)
+					return
+				}
 			}
-			wsMu.Unlock()
-			if time.Since(time.Unix(state.LastHeartbeat, 0)) > types.HeartbeatTimeout {
-				m.handleDisconnect(id)
-				return
+			m.ws1Mu.Unlock()
+
+			m.ws2Mu.Lock()
+			if id == types.Server2 && m.ws2 == conn {
+				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+					m.ws2Mu.Unlock()
+					m.triggerReconnect(id, 0)
+					return
+				}
+				if time.Since(time.Unix(m.state2.LastHeartbeat, 0)) > types.HeartbeatTimeout {
+					m.ws2Mu.Unlock()
+					m.triggerReconnect(id, 0)
+					return
+				}
 			}
+			m.ws2Mu.Unlock()
 		}
 	}
 }
 
+func (m *Manager) triggerReconnect(id types.ServerID, delay time.Duration) {
+	m.cleanupConnection(id)
+	select {
+	case m.reconnectChan <- reconnectEvent{serverID: id, delay: delay}:
+	case <-m.done:
+	}
+}
+
+func (m *Manager) cleanupConnection(id types.ServerID) {
+	if id == types.Server1 {
+		m.ws1Mu.Lock()
+		m.state1.Connected = false
+		m.state1.Ready = false
+		if m.ws1 != nil {
+			m.ws1.Close()
+			m.ws1 = nil
+		}
+		m.ws1Mu.Unlock()
+	} else {
+		m.ws2Mu.Lock()
+		m.state2.Connected = false
+		m.state2.Ready = false
+		if m.ws2 != nil {
+			m.ws2.Close()
+			m.ws2 = nil
+		}
+		m.ws2Mu.Unlock()
+	}
+
+	if m.handlers.state != nil {
+		m.handlers.state(id, false)
+	}
+}
+
+func (m *Manager) reconnectLoop() {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
+	for {
+		select {
+		case <-m.done:
+			return
+		case event := <-m.reconnectChan:
+			m.doReconnect(event.serverID, event.delay)
+		}
+	}
+}
+
+func (m *Manager) doReconnect(id types.ServerID, extraDelay time.Duration) {
+	state := &m.state1
+	if id == types.Server2 {
+		state = &m.state2
+	}
+
+	if state.ReconnectCount >= types.MaxReconnectAttempts {
+		slog.Error("重连次数已达上限", "server", id, "attempts", state.ReconnectCount)
+		return
+	}
+
+	delay := m.config.ReconnectDelay * time.Duration(1<<uint(state.ReconnectCount))
+	if delay > types.ReconnectMaxDelay {
+		delay = types.ReconnectMaxDelay
+	}
+	delay += extraDelay
+	state.ReconnectCount++
+
+	slog.Info("准备重连", "server", id, "attempt", state.ReconnectCount, "delay", delay)
+
+	select {
+	case <-m.done:
+		return
+	case <-time.After(delay):
+	}
+
+	var err error
+	if id == types.Server1 {
+		err = m.connectServer1(context.Background())
+	} else {
+		err = m.connectServer2(context.Background())
+	}
+
+	if err != nil {
+		slog.Error("重连失败", "server", id, "error", err)
+		select {
+		case m.reconnectChan <- reconnectEvent{serverID: id, delay: 0}:
+		case <-m.done:
+		}
+		return
+	}
+
+	slog.Info("重连成功", "server", id)
+
+	time.AfterFunc(types.StableThreshold, func() {
+		if id == types.Server1 {
+			m.ws1Mu.Lock()
+			stable := m.state1.Connected && m.ws1 != nil
+			m.ws1Mu.Unlock()
+			if stable {
+				slog.Info("连接稳定", "server", id)
+				state.ReconnectCount = 0
+			}
+		} else {
+			m.ws2Mu.Lock()
+			stable := m.state2.Connected && m.ws2 != nil
+			m.ws2Mu.Unlock()
+			if stable {
+				slog.Info("连接稳定", "server", id)
+				state.ReconnectCount = 0
+			}
+		}
+	})
+}
+
 func (m *Manager) startHeartbeat() {
+	m.wg.Add(1)
+	defer m.wg.Done()
+
 	ticker := time.NewTicker(types.AppHeartbeat)
 	defer ticker.Stop()
 
@@ -264,7 +439,9 @@ func (m *Manager) startHeartbeat() {
 		case <-ticker.C:
 			hb := protocol.BuildHeartbeatMessage(m.config.AgentID)
 			m.sendToServer1(hb)
-			m.sendToServer2(hb)
+			if !m.config.SingleServer {
+				m.sendToServer2(hb)
+			}
 		}
 	}
 }
@@ -310,105 +487,6 @@ func (m *Manager) handleMessage(data []byte, sourceServer types.ServerID) {
 	}
 }
 
-func (m *Manager) handleDisconnect(id types.ServerID) {
-	if id == types.Server1 {
-		m.ws1Mu.Lock()
-		m.state1.Connected = false
-		m.state1.Ready = false
-		if m.ws1 != nil {
-			m.ws1.Close()
-			m.ws1 = nil
-		}
-		m.ws1Mu.Unlock()
-	} else {
-		m.ws2Mu.Lock()
-		m.state2.Connected = false
-		m.state2.Ready = false
-		if m.ws2 != nil {
-			m.ws2.Close()
-			m.ws2 = nil
-		}
-		m.ws2Mu.Unlock()
-	}
-
-	if m.handlers.state != nil {
-		m.handlers.state(id, false)
-	}
-
-	go m.scheduleReconnect(id)
-}
-
-func (m *Manager) scheduleReconnect(id types.ServerID) {
-	state := &m.state1
-	if id == types.Server2 {
-		state = &m.state2
-	}
-
-	if state.ReconnectCount >= types.MaxReconnectAttempts {
-		fmt.Printf("[RECONNECT] %s max attempts reached\n", id)
-		return
-	}
-
-	delay := m.config.ReconnectDelay * time.Duration(1<<uint(state.ReconnectCount))
-	if delay > types.ReconnectMaxDelay {
-		delay = types.ReconnectMaxDelay
-	}
-	state.ReconnectCount++
-
-	fmt.Printf("[RECONNECT] %s attempt %d in %v\n", id, state.ReconnectCount, delay)
-
-	select {
-	case <-m.done:
-		return
-	case <-time.After(delay):
-	}
-
-	var err error
-	if id == types.Server1 {
-		err = m.connectServer1(context.Background())
-	} else {
-		err = m.connectServer2(context.Background())
-	}
-	if err != nil {
-		fmt.Printf("[RECONNECT] %s failed: %v\n", id, err)
-		go m.scheduleReconnect(id)
-		return
-	}
-	fmt.Printf("[RECONNECT] %s success, waiting for stability...\n", id)
-
-	// 等待连接稳定后再重置计数器
-	go m.waitForStability(id, state)
-}
-
-func (m *Manager) waitForStability(id types.ServerID, state *types.ServerState) {
-	timer := time.NewTimer(types.StableThreshold)
-	defer timer.Stop()
-
-	select {
-	case <-m.done:
-		return
-	case <-timer.C:
-		// 检查连接是否仍然稳定
-		if id == types.Server1 {
-			m.ws1Mu.Lock()
-			stable := m.state1.Connected && m.ws1 != nil
-			m.ws1Mu.Unlock()
-			if stable {
-				fmt.Printf("[STABLE] %s connection stable, resetting reconnect counter\n", id)
-				state.ReconnectCount = 0
-			}
-		} else {
-			m.ws2Mu.Lock()
-			stable := m.state2.Connected && m.ws2 != nil
-			m.ws2Mu.Unlock()
-			if stable {
-				fmt.Printf("[STABLE] %s connection stable, resetting reconnect counter\n", id)
-				state.ReconnectCount = 0
-			}
-		}
-	}
-}
-
 func (m *Manager) SendResponse(taskID, sessionID string, response *types.JsonRpcResponse) error {
 	m.mu.RLock()
 	serverID, ok := m.sessionServerMap[sessionID]
@@ -451,6 +529,10 @@ func (m *Manager) IsReady() bool {
 	m.ws1Mu.Lock()
 	ws1ok := m.state1.Ready && m.ws1 != nil
 	m.ws1Mu.Unlock()
+
+	if m.config.SingleServer {
+		return ws1ok
+	}
 
 	m.ws2Mu.Lock()
 	ws2ok := m.state2.Ready && m.ws2 != nil

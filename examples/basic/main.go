@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"math/rand"
 	"os"
 	"os/signal"
@@ -17,23 +18,26 @@ import (
 )
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	slog.SetDefault(logger)
+
 	godotenv.Load()
 
 	cfg := &types.Config{
-		AK:      os.Getenv("XIAOYI_AK"),
-		SK:      os.Getenv("XIAOYI_SK"),
-		AgentID: os.Getenv("XIAOYI_AGENT_ID"),
+		AK:           os.Getenv("XIAOYI_AK"),
+		SK:           os.Getenv("XIAOYI_SK"),
+		AgentID:      os.Getenv("XIAOYI_AGENT_ID"),
+		SingleServer: true,
 	}
 
 	if cfg.AK == "" || cfg.SK == "" || cfg.AgentID == "" {
-		fmt.Fprintln(os.Stderr, "请设置环境变量: XIAOYI_AK, XIAOYI_SK, XIAOYI_AGENT_ID")
+		slog.Error("请设置环境变量: XIAOYI_AK, XIAOYI_SK, XIAOYI_AGENT_ID")
 		os.Exit(1)
 	}
 
 	c := client.New(cfg)
 
 	var (
-		// firstMessageOnce sync.Once
 		sessionTaskIDs   = make(map[string]string)
 		sessionTaskIDsMu sync.Mutex
 	)
@@ -43,13 +47,11 @@ func main() {
 		taskID := msg.TaskID()
 		text := strings.TrimSpace(msg.Text())
 
-		fmt.Printf("\n[MSG] Session: %s\n", sessionID)
-		fmt.Printf("[MSG] TaskID: %s\n", taskID)
-		fmt.Printf("[MSG] Text: %s\n", text)
+		slog.Info("收到消息", "session", sessionID, "task", taskID, "text", text)
 
 		for _, p := range msg.Parts() {
 			if f, ok := p.(*types.FilePart); ok {
-				fmt.Printf("[MSG] File: %s (%s) URI: %s\n", f.Name(), f.MimeType(), f.URI())
+				slog.Info("收到文件", "name", f.Name(), "mime", f.MimeType(), "uri", f.URI())
 			}
 		}
 
@@ -57,23 +59,17 @@ func main() {
 		sessionTaskIDs[sessionID] = taskID
 		sessionTaskIDsMu.Unlock()
 
-		// 由于openclaw智能体拿不到pushId，现在没自主推送功能
-		// firstMessageOnce.Do(func() {
-		// 	fmt.Println("\n[FIRST] 开始每30秒推送测试消息...")
-		// 	go startPushLoop(c, &sessionTaskIDs, &sessionTaskIDsMu)
-		// })
-
 		if strings.HasPrefix(text, "/long") {
 			delay := time.Duration(rand.Intn(30)+1) * time.Second
-			fmt.Printf("[LONG] 将在 %v 后响应...\n", delay)
+			slog.Info("长任务开始", "delay", delay)
 
 			go func() {
 				time.Sleep(delay)
 				reply := fmt.Sprintf("长任务完成 (延迟 %v)", delay)
 				if err := c.Reply(context.Background(), taskID, sessionID, reply); err != nil {
-					fmt.Printf("[LONG] 发送失败: %v\n", err)
+					slog.Error("长任务发送失败", "error", err)
 				} else {
-					fmt.Printf("[LONG] 已响应\n")
+					slog.Info("长任务已响应", "delay", delay)
 				}
 			}()
 			return c.SendStatus(ctx, taskID, sessionID, fmt.Sprintf("处理中，预计 %v 后完成", delay))
@@ -84,78 +80,33 @@ func main() {
 	})
 
 	c.OnClear(func(sessionID string) {
-		fmt.Printf("\n[CLEAR] Session: %s\n", sessionID)
+		slog.Info("清理会话", "session", sessionID)
 		sessionTaskIDsMu.Lock()
 		delete(sessionTaskIDs, sessionID)
 		sessionTaskIDsMu.Unlock()
 	})
 
 	c.OnCancel(func(sessionID, taskID string) {
-		fmt.Printf("\n[CANCEL] Session: %s, Task: %s\n", sessionID, taskID)
+		slog.Info("取消任务", "session", sessionID, "task", taskID)
 	})
 
 	c.OnError(func(serverID string, err error) {
-		fmt.Printf("[ERROR] Server: %s, Error: %v\n", serverID, err)
+		slog.Error("服务器错误", "server", serverID, "error", err)
 	})
 
-	fmt.Println("Connecting...")
+	slog.Info("连接中...")
 	if err := c.Connect(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "Connect failed: %v\n", err)
+		slog.Error("连接失败", "error", err)
 		os.Exit(1)
 	}
 	defer c.Close()
 
-	fmt.Println("Connected!")
-	fmt.Println("命令:")
-	fmt.Println("  任意消息 -> Echo 回复")
-	fmt.Println("  /long   -> 随机延迟 1-30s 后回复")
-	fmt.Println("\nWaiting for messages...")
+	slog.Info("已连接", "commands", "任意消息->Echo回复, /long->随机延迟回复")
+	slog.Info("等待消息...")
 
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	fmt.Println("\nShutting down...")
-}
-
-// func startPushLoop(c client.Client, taskIDs *map[string]string, mu *sync.Mutex) {
-// 	ticker := time.NewTicker(30 * time.Second)
-// 	defer ticker.Stop()
-//
-// 	counter := 1
-// 	for range ticker.C {
-// 		mu.Lock()
-// 		sessCopy := make(map[string]string)
-// 		for k, v := range *taskIDs {
-// 			sessCopy[k] = v
-// 		}
-// 		mu.Unlock()
-//
-// 		if len(sessCopy) == 0 {
-// 			continue
-// 		}
-//
-// 		msg := fmt.Sprintf("[PUSH] 测试推送 #%d - %s", counter, time.Now().Format("15:04:05"))
-// 		fmt.Printf("\n%s\n", msg)
-//
-// 		for sessionID := range sessCopy {
-// 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-// 			if err := c.Push(ctx, sessionID, msg); err != nil {
-// 				fmt.Printf("[PUSH] 发送失败 Session=%s: %v\n", sessionID, err)
-// 			} else {
-// 				fmt.Printf("[PUSH] 已发送 Session=%s\n", sessionID)
-// 			}
-// 			cancel()
-// 		}
-// 		counter++
-// 	}
-// }
-
-func randomString(n int) string {
-	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"
-	b := make([]byte, n)
-	for i := range b {
-		b[i] = letters[rand.Intn(len(letters))]
-	}
-	return string(b)
+	slog.Info("关闭中...")
 }

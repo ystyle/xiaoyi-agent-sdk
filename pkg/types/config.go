@@ -23,6 +23,7 @@ type Config struct {
 	WSUrl2          string
 	EnableStreaming bool
 	ReconnectDelay  time.Duration
+	SingleServer    bool // 只连接 server1，避免同一 agentID 多连接
 }
 
 func DefaultConfig() *Config {
