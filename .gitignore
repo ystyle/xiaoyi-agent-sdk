@@ -1,0 +1,33 @@
+# Dependencies
+vendor/
+
+# Build
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# Test
+*.out
+coverage.out
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Temp
+*.tmp
+*.tgz
+
+# Secrets
+secret.json
+.env
+*.pem
+*.key
+
+# OS
+.DS_Store
+Thumbs.db
