@@ -33,7 +33,7 @@ func main() {
 	c := client.New(cfg)
 
 	var (
-		firstMessageOnce sync.Once
+		// firstMessageOnce sync.Once
 		sessionTaskIDs   = make(map[string]string)
 		sessionTaskIDsMu sync.Mutex
 	)
@@ -118,38 +118,38 @@ func main() {
 	fmt.Println("\nShutting down...")
 }
 
-func startPushLoop(c client.Client, taskIDs *map[string]string, mu *sync.Mutex) {
-	ticker := time.NewTicker(30 * time.Second)
-	defer ticker.Stop()
-
-	counter := 1
-	for range ticker.C {
-		mu.Lock()
-		sessCopy := make(map[string]string)
-		for k, v := range *taskIDs {
-			sessCopy[k] = v
-		}
-		mu.Unlock()
-
-		if len(sessCopy) == 0 {
-			continue
-		}
-
-		msg := fmt.Sprintf("[PUSH] 测试推送 #%d - %s", counter, time.Now().Format("15:04:05"))
-		fmt.Printf("\n%s\n", msg)
-
-		for sessionID := range sessCopy {
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-			if err := c.Push(ctx, sessionID, msg); err != nil {
-				fmt.Printf("[PUSH] 发送失败 Session=%s: %v\n", sessionID, err)
-			} else {
-				fmt.Printf("[PUSH] 已发送 Session=%s\n", sessionID)
-			}
-			cancel()
-		}
-		counter++
-	}
-}
+// func startPushLoop(c client.Client, taskIDs *map[string]string, mu *sync.Mutex) {
+// 	ticker := time.NewTicker(30 * time.Second)
+// 	defer ticker.Stop()
+//
+// 	counter := 1
+// 	for range ticker.C {
+// 		mu.Lock()
+// 		sessCopy := make(map[string]string)
+// 		for k, v := range *taskIDs {
+// 			sessCopy[k] = v
+// 		}
+// 		mu.Unlock()
+//
+// 		if len(sessCopy) == 0 {
+// 			continue
+// 		}
+//
+// 		msg := fmt.Sprintf("[PUSH] 测试推送 #%d - %s", counter, time.Now().Format("15:04:05"))
+// 		fmt.Printf("\n%s\n", msg)
+//
+// 		for sessionID := range sessCopy {
+// 			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+// 			if err := c.Push(ctx, sessionID, msg); err != nil {
+// 				fmt.Printf("[PUSH] 发送失败 Session=%s: %v\n", sessionID, err)
+// 			} else {
+// 				fmt.Printf("[PUSH] 已发送 Session=%s\n", sessionID)
+// 			}
+// 			cancel()
+// 		}
+// 		counter++
+// 	}
+// }
 
 func randomString(n int) string {
 	const letters = "abcdefghijklmnopqrstuvwxyz0123456789"

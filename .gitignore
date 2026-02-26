@@ -31,3 +31,8 @@ secret.json
 # OS
 .DS_Store
 Thumbs.db
+
+# Reference implementation (do not commit)
+package/
+*.tgz
+
