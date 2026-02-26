@@ -1,6 +1,8 @@
 # XiaoYi Agent SDK
 
-Go 语言版本的小艺 Agent SDK，用于接入华为小艺的 A2A (Agent-to-Agent) 协议。
+Go 语言版本的小艺 Agent SDK，用于 **OpenClaw 智能体**接入华为小艺的 A2A (Agent-to-Agent) 协议。
+
+> 本 SDK 为 OpenClaw 类型智能体设计，用于与小艺进行 Agent-to-Agent 通信。
 
 ## 特性
 
