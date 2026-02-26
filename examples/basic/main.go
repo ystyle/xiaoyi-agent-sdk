@@ -57,10 +57,11 @@ func main() {
 		sessionTaskIDs[sessionID] = taskID
 		sessionTaskIDsMu.Unlock()
 
-		firstMessageOnce.Do(func() {
-			fmt.Println("\n[FIRST] 开始每30秒推送测试消息...")
-			go startPushLoop(c, &sessionTaskIDs, &sessionTaskIDsMu)
-		})
+		// 由于openclaw智能体拿不到pushId，现在没自主推送功能
+		// firstMessageOnce.Do(func() {
+		// 	fmt.Println("\n[FIRST] 开始每30秒推送测试消息...")
+		// 	go startPushLoop(c, &sessionTaskIDs, &sessionTaskIDsMu)
+		// })
 
 		if strings.HasPrefix(text, "/long") {
 			delay := time.Duration(rand.Intn(30)+1) * time.Second
