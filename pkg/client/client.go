@@ -17,7 +17,7 @@ type Client interface {
 
 	Reply(ctx context.Context, taskID, sessionID, text string) error
 	ReplyStream(ctx context.Context, taskID, sessionID, text string, isFinal, append bool) error
-	SendStatus(ctx context.Context, taskID, sessionID, message string) error
+	SendStatus(ctx context.Context, taskID, sessionID, message, state string) error
 	SendError(ctx context.Context, taskID, sessionID, code, message string) error
 	Push(ctx context.Context, sessionID, text string) error
 
@@ -73,13 +73,13 @@ func (c *client) ReplyStream(ctx context.Context, taskID, sessionID, text string
 	return c.manager.SendResponse(taskID, sessionID, resp)
 }
 
-func (c *client) SendStatus(ctx context.Context, taskID, sessionID, message string) error {
+func (c *client) SendStatus(ctx context.Context, taskID, sessionID, message, state string) error {
 	if !c.IsReady() {
 		return types.ErrNotConnected
 	}
 
 	messageID := protocol.GenerateID()
-	resp := protocol.BuildStatusResponse(messageID, taskID, message)
+	resp := protocol.BuildStatusResponse(messageID, taskID, message, state)
 	return c.manager.SendResponse(taskID, sessionID, resp)
 }
 

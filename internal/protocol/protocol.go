@@ -73,14 +73,17 @@ func BuildArtifactResponse(messageID, taskID string, parts []types.Part, isFinal
 	}
 }
 
-func BuildStatusResponse(messageID, taskID, message string) *types.JsonRpcResponse {
+func BuildStatusResponse(messageID, taskID, message string, state string) *types.JsonRpcResponse {
+	if state == "" {
+		state = "working"
+	}
 	return &types.JsonRpcResponse{
 		JSONRPC: "2.0",
 		ID:      messageID,
 		Result: &types.StatusUpdate{
 			TaskID: taskID,
 			Kind:   "status-update",
-			Final:  false,
+			Final:  state == "completed",
 			Status: types.StatusPayload{
 				Message: types.MessageBody{
 					Role: "agent",
@@ -88,7 +91,7 @@ func BuildStatusResponse(messageID, taskID, message string) *types.JsonRpcRespon
 						types.NewTextPart(message),
 					},
 				},
-				State: "working",
+				State: state,
 			},
 		},
 	}

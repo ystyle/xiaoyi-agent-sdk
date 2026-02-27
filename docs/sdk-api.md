@@ -24,7 +24,7 @@ type Client interface {
     // 消息发送
     Reply(ctx context.Context, taskID, sessionID, text string) error
     ReplyStream(ctx context.Context, taskID, sessionID, text string, isFinal, append bool) error
-    SendStatus(ctx context.Context, taskID, sessionID, message string) error
+    SendStatus(ctx context.Context, taskID, sessionID, message, state string) error
     SendError(ctx context.Context, taskID, sessionID, code, message string) error
     
     // 事件注册

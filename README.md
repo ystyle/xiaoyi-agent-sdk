@@ -90,8 +90,9 @@ func main() {
 // 回复文本消息
 c.Reply(ctx, taskID, sessionID, "回复内容")
 
-// 发送状态更新（处理中）
-c.SendStatus(ctx, taskID, sessionID, "处理中...")
+// 发送状态更新
+c.SendStatus(ctx, taskID, sessionID, "处理中...", "working")
+c.SendStatus(ctx, taskID, sessionID, "已完成", "completed")
 
 // 流式回复
 c.ReplyStream(ctx, taskID, sessionID, "部分内容", false, true) // append=true

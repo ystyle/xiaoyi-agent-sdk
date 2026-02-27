@@ -66,13 +66,16 @@ func main() {
 			go func() {
 				time.Sleep(delay)
 				reply := fmt.Sprintf("长任务完成 (延迟 %v)", delay)
-				if err := c.Reply(context.Background(), taskID, sessionID, reply); err != nil {
+				if err := c.ReplyStream(context.Background(), taskID, sessionID, reply, false, false); err != nil {
 					slog.Error("长任务发送失败", "error", err)
-				} else {
-					slog.Info("长任务已响应", "delay", delay)
+					return
 				}
+				if err := c.SendStatus(context.Background(), taskID, sessionID, "已完成", "completed"); err != nil {
+					slog.Error("发送完成状态失败", "error", err)
+				}
+				slog.Info("长任务已响应", "delay", delay)
 			}()
-			return c.SendStatus(ctx, taskID, sessionID, fmt.Sprintf("处理中，预计 %v 后完成", delay))
+			return c.SendStatus(ctx, taskID, sessionID, fmt.Sprintf("处理中，预计 %v 后完成", delay), "working")
 		}
 
 		reply := fmt.Sprintf("Echo: %s", text)
